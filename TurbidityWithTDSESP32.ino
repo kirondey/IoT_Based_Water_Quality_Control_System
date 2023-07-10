@@ -1,0 +1,259 @@
+/*
+* TDS 32
+* Tur 34
+* Temp 39 Vn
+*/
+
+#include <WiFi.h>
+#include <WiFiClient.h>
+#include <WebServer.h>
+#include <Wire.h>
+#include "LiquidCrystal_I2C.h"
+#include <string>
+
+
+#include "index.h"  //Web page header file
+
+#define TdsSensorPin 32       
+#define VREF 5.5              // analog reference voltage(Volt) of the ADC
+#define SCOUNT  30            // sum of sample point
+
+int analogBuffer[SCOUNT];     // store the analog value in the array, read from ADC
+int analogBufferTemp[SCOUNT];
+int analogBufferIndex = 0;
+int copyIndex = 0;
+
+float averageVoltage = 0;
+float temperature = 25;       // current temperature for compensation
+
+WebServer server(80);
+
+/*Put your SSID & Password*/
+const char *ssid = "Redmi Note 7 Pro";   // Enter SSID here
+const char *password = "12121212"; // Enter Password here
+float tempC = 0;
+int sensorPin = 34;
+float volt;
+float ntu;
+float tdsValue;
+String tds = "0";
+
+String turbidity ="0";
+String isDrinkable = "Yes";
+
+// set the LCD number of columns and rows
+int lcdColumns = 16;
+int lcdRows = 2;
+
+LiquidCrystal_I2C lcd(0x27, lcdColumns, lcdRows);  
+
+//Temperature LM35
+#define ADC_VREF_mV    5000.0 // in millivolt
+#define ADC_RESOLUTION 4096.0
+
+//===============================================================
+// This routine is executed when you open its IP in browser
+//===============================================================
+void handleRoot() {
+ String s = MAIN_page; //Read HTML contents
+ server.send(200, "text/html", s); //Send web page
+}
+
+void handleTemp() {
+  // read the ADC value from the temperature sensor
+  int adcVal = analogRead(39);
+  // convert the ADC value to voltage in millivolt
+  float milliVolt = adcVal * (ADC_VREF_mV / ADC_RESOLUTION);
+  // convert the voltage to the temperature in °C
+  tempC = milliVolt / 10;
+  Serial.println(tempC);
+  // convert the °C to °F
+  float tempF = tempC * 9 / 5 + 32;
+    
+    delay(10);
+ 
+ //server.send(200, "text/html", SendHTML(turbidity, tds, isDrinkable)); //Send ADC value only to client ajax request
+ String t = (String)tempC;
+lcd.setCursor(10,0);
+  lcd.print(t+"C");
+ 
+ server.send(200, "text/plane", t);
+}
+ 
+void handleTurbidity() {
+ volt = 0;
+    for(int i=0; i<800; i++)
+    {
+        volt += ((float)analogRead(sensorPin)/1023)*5;
+    }
+    volt = volt/800;
+    volt = round_to_dp(volt,1);
+    if(volt < 2.5){
+      ntu = 3000;
+    }else{
+      ntu = 1120.4*square(volt)+5742.3*volt-4353.8; 
+      ntu = ntu/1000000;
+    }
+turbidity = (String)ntu+" NTU";
+    
+    delay(10);
+ 
+ //server.send(200, "text/html", SendHTML(turbidity, tds, isDrinkable)); //Send ADC value only to client ajax request
+ server.send(200, "text/plane", turbidity);
+}
+
+void handleTds()
+{
+  static unsigned long analogSampleTimepoint = millis();
+  if(millis()-analogSampleTimepoint > 40U){     //every 40 milliseconds,read the analog value from the ADC
+    analogSampleTimepoint = millis();
+    analogBuffer[analogBufferIndex] = analogRead(TdsSensorPin);    //read the analog value and store into the buffer
+    analogBufferIndex++;
+    if(analogBufferIndex == SCOUNT){ 
+      analogBufferIndex = 0;
+    }
+  }   
+  
+  static unsigned long printTimepoint = millis();
+  if(millis()-printTimepoint > 800U){
+    printTimepoint = millis();
+    for(copyIndex=0; copyIndex<SCOUNT; copyIndex++){
+      analogBufferTemp[copyIndex] = analogBuffer[copyIndex];
+      
+      // read the analog value more stable by the median filtering algorithm, and convert to voltage value
+      averageVoltage = getMedianNum(analogBufferTemp,SCOUNT) * (float)VREF / 4096.0;
+      
+      //temperature compensation formula: fFinalResult(25^C) = fFinalResult(current)/(1.0+0.02*(fTP-25.0)); 
+      float compensationCoefficient = 1.0+0.02*(temperature-25.0);
+      //temperature compensation
+      float compensationVoltage=averageVoltage/compensationCoefficient;
+      
+      //convert voltage value to tds value
+      tdsValue=(133.42*compensationVoltage*compensationVoltage*compensationVoltage - 255.86*compensationVoltage*compensationVoltage + 857.39*compensationVoltage)*0.5;
+      
+      //Serial.print("voltage:");
+      //Serial.print(averageVoltage,2);
+      //Serial.print("V   ");
+      Serial.print("TDS Value:");
+      Serial.print(tdsValue,0);
+      Serial.println("ppm");
+    }
+  }
+    tds = (String)tdsValue+" PPM";
+    // set cursor to first column, first row
+  lcd.setCursor(0, 0);
+  // print message
+  lcd.print(turbidity);
+     server.send(200, "text/plane", tds);
+}
+
+void handleIsDrinkable()
+{
+  if(tdsValue>39 && tdsValue < 150) //TDS range select
+    isDrinkable = "Yes";
+  else
+    isDrinkable = "No";
+    lcd.setCursor(0,1);
+  lcd.print(tds);
+  server.send(200, "text/plane", isDrinkable);
+}
+
+//===============================================================
+// Setup
+//===============================================================
+
+void setup(void){
+  Serial.begin(115200);
+// initialize LCD
+  lcd.init();
+  // turn on LCD backlight                      
+  lcd.backlight();
+  
+  Serial.println();
+  Serial.println("Booting Sketch...");
+
+/*
+//ESP32 As access point
+  WiFi.mode(WIFI_AP); //Access Point mode
+  WiFi.softAP(ssid, password);
+*/
+//ESP32 connects to your wifi -----------------------------------
+  WiFi.mode(WIFI_STA); //Connectto your wifi
+  WiFi.begin(ssid, password);
+
+  Serial.println("Connecting to ");
+  Serial.print(ssid);
+
+  //Wait for WiFi to connect
+  while(WiFi.waitForConnectResult() != WL_CONNECTED){      
+      Serial.print(".");
+    }
+    
+  //If connection successful show IP address in serial monitor
+  Serial.println("");
+  Serial.print("Connected to ");
+  Serial.println(ssid);
+  Serial.print("IP address: ");
+  Serial.println(WiFi.localIP());  //IP address assigned to your ESP
+//----------------------------------------------------------------
+ 
+  server.on("/", handleRoot);      //This is display page
+  server.on("/readTurbidity", handleTurbidity);//To get update of handleTurbidity Value only
+  server.on("/readTds", handleTds);//To get update of handleTurbidity Value only
+  server.on("/readIsDrinkable", handleIsDrinkable);//To get update of handleTurbidity Value only
+  server.on("/readTemp", handleTemp);//To get update of handleTurbidity Value only
+ 
+  server.begin();                  //Start server
+  Serial.println("HTTP server started");
+  lcd.setCursor(0, 0);
+  lcd.print("Got IP: ");
+
+  lcd.setCursor(0, 1);
+  lcd.print(WiFi.localIP());
+  delay(5000);
+  lcd.clear();
+}
+
+//===============================================================
+// This routine is executed when you open its IP in browser
+//===============================================================
+void loop(void){
+  server.handleClient();
+  delay(1);
+}
+
+float round_to_dp( float in_value, int decimal_place )
+{
+  float multiplier = powf( 10.0f, decimal_place );
+  in_value = roundf( in_value * multiplier ) / multiplier;
+  return in_value;
+}
+
+float square(float in)
+{
+  return in*in;
+}
+
+// median filtering algorithm
+int getMedianNum(int bArray[], int iFilterLen){
+  int bTab[iFilterLen];
+  for (byte i = 0; i<iFilterLen; i++)
+  bTab[i] = bArray[i];
+  int i, j, bTemp;
+  for (j = 0; j < iFilterLen - 1; j++) {
+    for (i = 0; i < iFilterLen - j - 1; i++) {
+      if (bTab[i] > bTab[i + 1]) {
+        bTemp = bTab[i];
+        bTab[i] = bTab[i + 1];
+        bTab[i + 1] = bTemp;
+      }
+    }
+  }
+  if ((iFilterLen & 1) > 0){
+    bTemp = bTab[(iFilterLen - 1) / 2];
+  }
+  else {
+    bTemp = (bTab[iFilterLen / 2] + bTab[iFilterLen / 2 - 1]) / 2;
+  }
+  return bTemp;
+}
